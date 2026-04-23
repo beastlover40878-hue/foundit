@@ -1,0 +1,111 @@
+import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { User, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
+import { auth, db, handleFirestoreError } from './lib/firebase';
+import { doc, onSnapshot, setDoc, serverTimestamp, increment } from 'firebase/firestore';
+
+interface AuthContextType {
+  user: User | null;
+  userProfile: any | null;
+  loading: boolean;
+  login: () => Promise<void>;
+  logout: () => Promise<void>;
+  addKarmaCoins: (amount: number) => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let unsubProfile: (() => void) | null = null;
+
+    const unsubscribe = onAuthStateChanged(auth, async (authUser) => {
+      setUser(authUser);
+      
+      // Cleanup previous profile listener if any
+      if (unsubProfile) {
+        unsubProfile();
+        unsubProfile = null;
+      }
+
+      if (authUser) {
+        // Sync user profile
+        const userRef = doc(db, 'users', authUser.uid);
+        
+        // Listen to profile changes (coins)
+        unsubProfile = onSnapshot(userRef, (docSnap) => {
+          if (docSnap.exists()) {
+            setUserProfile(docSnap.data());
+          } else {
+            // Initialize profile
+            setDoc(userRef, {
+              email: authUser.email || '',
+              displayName: authUser.displayName || 'Campus User',
+              photoURL: authUser.photoURL || '',
+              karmaCoins: 0,
+              updatedAt: serverTimestamp()
+            }).catch(err => {
+              console.error("Failed to initialize user profile:", err);
+            });
+          }
+        }, (err) => {
+          handleFirestoreError(err, 'get', `/users/${authUser.uid}`);
+        });
+        
+        setLoading(false);
+      } else {
+        setUserProfile(null);
+        setLoading(false);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      if (unsubProfile) unsubProfile();
+    };
+  }, []);
+
+  const login = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (error: any) {
+      if (error.code === 'auth/popup-closed-by-user') {
+        console.warn('Login popup closed by user');
+        return;
+      }
+      console.error('Login failed:', error);
+      throw error;
+    }
+  };
+
+  const logout = async () => {
+    await signOut(auth);
+  };
+
+  const addKarmaCoins = async (amount: number) => {
+    if (!user) return;
+    const userRef = doc(db, 'users', user.uid);
+    await setDoc(userRef, {
+      karmaCoins: increment(amount),
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, userProfile, loading, login, logout, addKarmaCoins }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+}
